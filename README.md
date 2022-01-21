@@ -1,5 +1,5 @@
 <h1 align="left">Kunal Dawn</h1>
-<h3 align="left">Lead Technology Architect @ Pocket52</h3>
+<h3 align="left">VP Engineering [Backend] @ BobbleAI</h3>
 
 <p align="left">
    <img src="https://raw.githubusercontent.com/kunaldawn/kunaldawn/main/matrix.gif">
@@ -26,10 +26,10 @@
    
 |Link|
 |--|
-|https://www.ieice.org/ken/paper/20121214cBA7/eng/|
-|https://ieeexplore.ieee.org/document/6208405|
-|http://www.ciitresearch.org/dl/index.php/nce/article/view/NCE022015003.|
-|https://www.interscience.in/ijcsi/vol3/iss2/5/|
+|<a href="https://www.ieice.org/ken/paper/20121214cBA7/eng/" target="blank">Analysis of cooperation of node movement and its effects on messaging delay in DTN systems</a>|
+|<a href="https://ieeexplore.ieee.org/document/6208405" href="blank">A novel gesture based graphical authentication using bounding box and corner detection algorithm</a>|
+|<a href="http://www.ciitresearch.org/dl/index.php/nce/article/view/NCE022015003." target="blank">Investigation of Educational Content Delivery in Villages Using Bus Assisted DTN and its Simulation Analysis</a>|
+|<a href="https://www.interscience.in/ijcsi/vol3/iss2/5/" target="blank">Graphical Authentication using region based graphical password</a>|
    
 </p>
 
