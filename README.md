@@ -1,5 +1,5 @@
 <h1 align="left">Kunal Dawn</h1>
-<h3 align="left">VP Engineering [Backend] @ BobbleAI</h3>
+<h3 align="left">VP Engineering [Backend] @ <a href="https://www.bobble.ai/en/home" target="blank">BobbleAI</a></h3>
 
 <p align="left">
    <img src="https://raw.githubusercontent.com/kunaldawn/kunaldawn/main/matrix.gif">
