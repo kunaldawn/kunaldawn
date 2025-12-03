@@ -1,18 +1,9 @@
 <h1 align="left">Kunal Dawn</h1>
-<h3 align="left">VP Engineering [Backend] @ <a href="https://www.bobble.ai/en/home" target="blank">BobbleAI</a></h3>
+<h3 align="left">SVP Engineering [Backend] @ <a href="https://www.bobble.ai/en/home" target="blank">BobbleAI</a></h3>
 
 <p align="left">
    <img src="https://raw.githubusercontent.com/kunaldawn/kunaldawn/main/matrix.gif">
 </p>
-
-<div>
-  <div align="left" style="margin:10px">
-    <img src="https://github-readme-stats.vercel.app/api?username=kunaldawn&show_icons=true&theme=dark&locale=en" alt="kunaldawn" />
-  </div>
-  <div align="left" style="margin:10px">
-    <img src="https://github-readme-streak-stats.herokuapp.com/?user=kunaldawn&theme=dark" alt="kunaldawn" />
-  </div>
-</div>
 
 <h3 align="left">Me:</h3>
 <p align="left">
@@ -39,5 +30,4 @@
 </p>
 
 <div align="left" style="margin:10px">
- <img src="https://github-readme-stats.vercel.app/api/top-langs?username=kunaldawn&show_icons=true&theme=dark&locale=en&layout=compact" alt="kunaldawn" />
 </div>
