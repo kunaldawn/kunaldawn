@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# local scratch / dropped input images (deliverable images are SVGs + tools/headshot.png)
+/*.png
+/Screenshot*.png
+/Gemini_Generated_Image_*.png
+.playwright-mcp/

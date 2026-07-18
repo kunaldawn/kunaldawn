@@ -1,0 +1,49 @@
+name: Update profile card
+
+on:
+  schedule:
+    - cron: "17 3 * * *"        # daily at 03:17 UTC
+  workflow_dispatch:            # allow manual runs
+  push:
+    branches: [main]
+    paths:
+      - generate_profile.py
+      - .github/workflows/profile.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: profile-card
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Render dark_mode.svg / light_mode.svg
+        env:
+          # GITHUB_TOKEN gives contribution-style commit counts (public + private).
+          # Add an ACCESS_TOKEN secret (a classic PAT with repo + read:user) to
+          # also count stars/LOC across private repos; it is optional.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+        run: python3 generate_profile.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain dark_mode.svg light_mode.svg)" ]; then
+            git add dark_mode.svg light_mode.svg
+            git commit -m "chore: refresh profile card stats"
+            git push
+          else
+            echo "No changes."
+          fi
