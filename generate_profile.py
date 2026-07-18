@@ -402,39 +402,41 @@ def face_columns():
 
 
 def render_portrait(mode):
-    """Each column is clipped by a rectangle that grows downward (reveal) and
-    later slides down to nothing (melt), so the face crystallises column-by-
-    column behind the rain and dissolves back into it every cycle."""
+    """Face crystallises column-by-column behind the rain: each column wipes in
+    top-to-bottom, holds, then melts away top-to-bottom.
+
+    This reproduces the ORIGINAL clip-path crystallise EXACTLY — same per-column
+    stagger, same reveal/hold/melt timing (0.12/0.32/0.80/0.95 of the cycle), same
+    top-to-bottom wipe — but drives it with per-cell opacity instead of an animated
+    <clipPath>. WebKit/Safari silently drops animated clipPath geometry in an SVG
+    loaded as an <img>, which rendered the whole face blank on Apple devices; opacity
+    animates identically everywhere. Each cell reveals/melts as the (former clip)
+    frontier would have passed its row, so the visible result is unchanged."""
     top = ART_Y - ART_LH
     height = len(FACE) * ART_LH + ART_LH
-    bottom = top + height
     rng = random.Random(SEED)
     cols = face_columns()
     ncols = max(cols) + 1
-    defs, groups = [], []
+    out = [f'<g font-size="{ART_FS}px">']
     for c in sorted(cols):
         cx = ART_X + c * ART_CW
-        cid = f"c{mode[0]}{c}"
-        jitter = (c / ncols) * 1.3 + rng.uniform(0.0, 0.55)     # organic per-column stagger
+        jitter = (c / ncols) * 1.3 + rng.uniform(0.0, 0.55)     # identical per-column stagger
         begin = f"{-CYCLE + 0.5 + jitter:.3f}s"
-        defs.append(
-            f'<clipPath id="{cid}"><rect x="{cx - 0.6:.1f}" width="{ART_CW + 0.8:.1f}" '
-            f'y="{top:.1f}" height="0">'
-            f'<animate attributeName="height" begin="{begin}" dur="{CYCLE}s" '
-            f'repeatCount="indefinite" values="0;0;{height:.0f};{height:.0f};0;0" '
-            f'keyTimes="0;0.12;0.32;0.80;0.95;1"/>'
-            f'<animate attributeName="y" begin="{begin}" dur="{CYCLE}s" '
-            f'repeatCount="indefinite" '
-            f'values="{top:.0f};{top:.0f};{top:.0f};{bottom:.0f};{bottom:.0f}" '
-            f'keyTimes="0;0.32;0.80;0.95;1"/>'
-            f'</rect></clipPath>')
-        cells = "".join(
-            f'<tspan x="{cx:.1f}" y="{ART_Y + r * ART_LH:.1f}" '
-            f'fill="{face_color(lvl)}">{esc(ch)}</tspan>'
-            for r, ch, lvl in cols[c])
-        groups.append(f'<text clip-path="url(#{cid})" xml:space="preserve">{cells}</text>')
-    return (f'<defs>{"".join(defs)}</defs>'
-            f'<g font-size="{ART_FS}px">{"".join(groups)}</g>')
+        cells = []
+        for r, ch, lvl in cols[c]:
+            y = ART_Y + r * ART_LH
+            frac = (y - top) / height                            # row position along the wipe
+            rs = 0.12 + frac * 0.20                               # reveal frontier reaches this row
+            ms = 0.80 + frac * 0.15                               # melt frontier reaches this row
+            kt = f"0;{rs - 0.006:.4f};{rs:.4f};{ms:.4f};{ms + 0.006:.4f};1"
+            cells.append(
+                f'<text x="{cx:.1f}" y="{y:.1f}" fill="{face_color(lvl)}" opacity="0" '
+                f'xml:space="preserve">{esc(ch)}'
+                f'<animate attributeName="opacity" begin="{begin}" dur="{CYCLE}s" '
+                f'repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="{kt}"/></text>')
+        out.append("".join(cells))
+    out.append('</g>')
+    return "\n".join(out)
 
 
 def render_rain():
@@ -470,43 +472,39 @@ def render_rain():
             f'<text y="{top:.1f}" xml:space="preserve">{"".join(tspans)}'
             f'<animateTransform attributeName="transform" type="translate" '
             f'dur="{dur:.2f}s" begin="{delay:.2f}s" repeatCount="indefinite" '
-            f'values="0 -80; 0 {span:.0f}"/></text>')
+            f'values="0 -80;0 {span:.0f}"/></text>')
     out.append('</g>')
     return "\n".join(out)
 
 
 def render_panel(p, stats):
-    """Neofetch panel that types itself out like a terminal: each line wipes in
-    left-to-right, staggered top-to-bottom, then a green caret blinks."""
+    """Neofetch panel that prints itself line-by-line (each line fades in,
+    staggered top-to-bottom), then a green caret blinks. Opacity-only: the
+    original left-to-right clip-path 'typing' wipe also blanked on Safari/WebKit
+    (animated clipPath), so the reveal is done with opacity, which animates
+    everywhere."""
     lines = info_lines(stats)
-    reveal_w = CARD_W - PANEL_X - 16
-    defs, body = ['<defs>'], []
+    body = []
     rank, last_y = 0, PANEL_Y
     for i, segs in enumerate(lines):
         if not segs:
             continue
         y = PANEL_Y + i * PANEL_STEP
         last_y = y
-        begin = 0.4 + rank * 0.10
-        cid = f"pl{i}"
-        defs.append(
-            f'<clipPath id="{cid}"><rect x="{PANEL_X - 3:.0f}" y="{y - 12:.0f}" '
-            f'width="0" height="18"><animate attributeName="width" begin="{begin:.2f}s" '
-            f'dur="0.34s" values="0;{reveal_w:.0f}" calcMode="spline" '
-            f'keySplines=".2 0 .1 1" fill="freeze"/></rect></clipPath>')
+        begin = 0.4 + rank * 0.09
         spans = "".join(f'<tspan fill="{p[c]}">{esc(t)}</tspan>' for t, c in segs)
-        body.append(f'<text x="{PANEL_X}" y="{y:.1f}" clip-path="url(#{cid})" '
-                    f'xml:space="preserve">{spans}</text>')
+        body.append(
+            f'<text x="{PANEL_X}" y="{y:.1f}" opacity="0" xml:space="preserve">{spans}'
+            f'<animate attributeName="opacity" begin="{begin:.2f}s" dur="0.5s" '
+            f'values="0;1" calcMode="spline" keySplines=".3 0 .3 1" fill="freeze"/></text>')
         rank += 1
-    defs.append('</defs>')
     caret_y = last_y + PANEL_STEP
-    caret_begin = 0.4 + rank * 0.10
+    caret_begin = 0.4 + rank * 0.09
     caret = (f'<rect x="{PANEL_X}" y="{caret_y - 11:.0f}" width="8" height="14" '
              f'fill="{p["g"]}" opacity="0"><animate attributeName="opacity" '
              f'begin="{caret_begin:.2f}s" dur="1.05s" values="0;1;1;0;0" '
              f'keyTimes="0;0.03;0.5;0.53;1" repeatCount="indefinite"/></rect>')
-    return (f'<g font-size="{PANEL_FS}px">' + "\n".join(defs) + "\n"
-            + "\n".join(body) + "\n" + caret + '</g>')
+    return (f'<g font-size="{PANEL_FS}px">' + "\n".join(body) + "\n" + caret + '</g>')
 
 
 def render(mode, stats):
