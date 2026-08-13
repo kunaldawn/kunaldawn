@@ -29,7 +29,7 @@ TIMELINE = [
     ("pocket52", "Pocket52", "Lead Architect", "2021 — 2021", "Bangalore, India"),
     ("cloudfeather", "CloudFeather Games", "Co-Founder & CTO", "2020 — 2021", "Bangalore, India"),
     ("pocket52", "Pocket52", "VP of Engineering · Technology Architect", "2018 — 2020", "Bangalore, India"),
-    ("bobble", "Bobble AI", "Research & Development Lead", "2015 — 2018", "Bangalore, India"),
+    ("bobble", "Bobble AI", "Research & Development Lead", "2015 — 2018", "Delhi NCR, India"),
     ("sony", "Sony Mobile Communications", "System Verification Engineer", "2014 — 2015", "Tokyo, Japan"),
     ("srmtech", "SRM Technologies", "Sr. Technical Consultant", "2013 — 2015", "Tokyo, Japan"),
     ("nec", "NEC Corporation", "Technical Consultant · Intern", "2012 — 2014", "Kawasaki, Japan"),

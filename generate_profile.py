@@ -338,6 +338,24 @@ def repo_langs(repos):
     return top_langs(sizes, colors)
 
 
+def github_daily():
+    """GitHub's own contribution calendar, keyed by date. This is the only way to
+    see work in repos the token cannot enumerate — private ORG repos, where
+    GitHub reports a `restrictedContributionsCount` but hides the repository. It
+    misses commits that never reached a default branch, which walk_commits()
+    supplies."""
+    now = datetime.now(TZ)
+    frm = now - timedelta(days=364)
+    weeks = graphql(f'''query {{ user(login: "{USER}") {{
+      contributionsCollection(from: "{frm.strftime('%Y-%m-%dT00:00:00Z')}",
+                              to: "{now.strftime('%Y-%m-%dT%H:%M:%SZ')}") {{
+        contributionCalendar {{ weeks {{ contributionDays {{
+          contributionCount date }} }} }} }} }} }}''', token=PRIV_TOKEN
+                    )["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]
+    return {datetime.fromisoformat(d["date"]).date(): d["contributionCount"]
+            for w in weeks for d in w["contributionDays"]}
+
+
 def branch_names(name, default=None):
     """Every head ref of a repo, default branch first so that the branches which
     were merged into it hit the already-seen shortcut in walk_commits()."""
@@ -355,12 +373,18 @@ def branch_names(name, default=None):
     return out
 
 
-def walk_commits(name, uid, default, seen, daily):
+def walk_commits(name, uid, default, seen, daily, offbranch):
     """Every commit the user authored in one repo, on ANY branch, deduped by SHA
     and bucketed into `daily` by local calendar day. Private repos are included
-    as long as the token can see them. Returns (commits, +lines, -lines)."""
+    as long as the token can see them. Returns (commits, +lines, -lines).
+
+    Commits found off the default branch also land in `offbranch`: the default
+    branch is walked first, so anything still unseen afterwards is work GitHub's
+    contribution graph does not credit, and only that surplus is added on top of
+    GitHub's own daily counts."""
     n = add = rem = 0
     for br in branch_names(name, default):
+        off = br != default
         cursor, lite = None, False
         while True:
             v = {"owner": USER, "name": name, "id": uid, "ref": br, "cursor": cursor}
@@ -387,6 +411,8 @@ def walk_commits(name, uid, default, seen, daily):
                 rem += c.get("deletions", 0)
                 day = datetime.fromisoformat(c["committedDate"]).astimezone(TZ).date()
                 daily[day] = daily.get(day, 0) + 1
+                if off:
+                    offbranch[day] = offbranch.get(day, 0) + 1
             # a whole page already seen means this branch has rejoined history
             # walked earlier; its ancestors are all counted, so stop paging
             if fresh == 0 or not h["pageInfo"]["hasNextPage"]:
@@ -458,19 +484,29 @@ def token_stats():
     s["langs"] = repo_langs(repos)
 
     # one history walk per repo feeds commits, LOC and the activity grid
-    seen, daily = set(), {}
+    seen, daily, offbranch = set(), {}, {}
     commits = add = rem = 0
     for r in repos:
         name = r["name"]
         n, a, d = walk_commits(name, u["id"],
                                (r.get("defaultBranchRef") or {}).get("name"),
-                               seen, daily)
+                               seen, daily, offbranch)
         commits += n
         add += a
         rem += d
     s["commits"] = commits
     s["loc"], s["loc_add"], s["loc_del"] = add - rem, add, rem
-    s.update(commit_calendar(daily))
+
+    # Activity grid = GitHub's daily counts (the only view of private ORG repos)
+    # plus our off-default-branch commits (the work GitHub never credits).
+    try:
+        merged = github_daily()
+        for day, n in offbranch.items():
+            merged[day] = merged.get(day, 0) + n
+    except Exception as e:
+        print("github_daily failed, using walked commits only:", e)
+        merged = daily
+    s.update(commit_calendar(merged))
     return s
 
 
