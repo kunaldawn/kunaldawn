@@ -15,8 +15,9 @@ import html
 import json
 import os
 import random
+import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 USER = "kunaldawn"
 JOINED_YEAR = 2013            # GitHub account creation year, never changes
@@ -111,6 +112,9 @@ PALETTES = {
         "h": "#58a6ff", "k": "#ffa657", "v": "#c9d1d9", "d": "#484f58",
         "g": "#3fb950", "r": "#f85149",
         "rain": "#2ea043", "rain_head": "#c5f7cd",
+        # contribution-graph ramp, none -> most
+        "heat": ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"],
+        "heat_edge": "#21262d",
     },
     "light": {
         "light": True,
@@ -118,24 +122,33 @@ PALETTES = {
         "h": "#0969da", "k": "#953800", "v": "#24292f", "d": "#afb8c1",
         "g": "#1a7f37", "r": "#cf222e",
         "rain": "#1a7f37", "rain_head": "#0a3d1a",
+        "heat": ["#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39"],
+        "heat_edge": "#d0d7de",
     },
 }
 
 # --- geometry ---------------------------------------------------------------
-CARD_W, CARD_H = 958, 566
-ART_X, ART_Y, ART_LH = 30, 42, 9.2       # portrait origin / line height
-ART_FS, ART_CW = 9, 5.4                   # portrait font size / advance width
-PANEL_X, PANEL_Y, PANEL_STEP = 515, 40, 21.5
+# CARD_H is derived from the panel content (see layout()); the portrait is then
+# centred vertically in whatever screen height that leaves.
+MIN_CARD_H = 566
+ART_LH, ART_FS, ART_CW = 9.2, 9, 5.4      # portrait line height / font / advance
+MAX_FACE_SCALE = 1.25                     # cap so glyphs stay crisp
+GUTTER = 28                               # screen -> panel gap
+PANEL_Y, PANEL_STEP = 40, 19.0
+CARD_W = PANEL_X = 0                      # both derived in layout()
 PANEL_FS = 13
+CH_W = PANEL_FS * 0.6                     # mono advance width at PANEL_FS
 DOT_W = 54                                # dotted-leader width in characters
+PANEL_W = DOT_W * CH_W                    # panel width in px (graphics span this)
+HEAT_KEY_W = 96                           # gutter for the heatmap less/more key
 FONT = "font-family=\"'JetBrains Mono','SF Mono',Consolas,Menlo,monospace\""
 CYCLE = 10.0                              # master animation loop, seconds
+PULSE_DUR = 9.0                           # section-rule packet loop, seconds
 RAIN_GLYPHS = "01<>/{}[]=+*ilcXUZ0O4%#@$abcdef2379"
 
 # The matrix face always lives on a dark "screen" panel — in both themes — so
 # the green portrait looks identical in light and dark mode.
 SCREEN_X, SCREEN_Y = 16, 16
-SCREEN_W, SCREEN_H = 470, CARD_H - 32
 SCREEN_BG, SCREEN_BORDER = "#0a0e14", "#1d2530"
 FACE_RAIN, FACE_RAIN_HEAD = "#2ea043", "#c5f7cd"
 
@@ -147,15 +160,25 @@ TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("ACCESS_TOKEN") or ""
 PRIV_TOKEN = os.environ.get("ACCESS_TOKEN") or TOKEN
 
 
-def gh(url, payload=None, token=None):
+def gh(url, payload=None, token=None, tries=4):
+    """One API call, retried with backoff. A long stats run makes thousands of
+    requests; a single dropped connection used to abandon the whole token path
+    and fall back to public-only numbers."""
     headers = {"Accept": "application/vnd.github+json", "User-Agent": USER}
     auth = token or TOKEN
     if auth:                       # public REST works token-free; never send an empty Bearer
         headers["Authorization"] = f"Bearer {auth}"
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode() if payload else None, headers=headers)
-    with urllib.request.urlopen(req) as r:
-        return json.loads(r.read() or "{}")
+    body = json.dumps(payload).encode() if payload else None
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read() or "{}")
+        except Exception as e:
+            if attempt == tries - 1:
+                raise
+            print(f"  retry {attempt + 1}/{tries - 1} after {e}")
+            time.sleep(2 ** attempt)
 
 
 def graphql(query, variables=None, token=None):
@@ -168,11 +191,39 @@ def graphql(query, variables=None, token=None):
 
 STAT_KEYS = ("followers", "following", "repos", "private", "stars", "commits",
              "prs", "issues", "reviews", "contribs", "member", "age",
-             "loc", "loc_add", "loc_del")
+             "loc", "loc_add", "loc_del",
+             "langs", "cal", "cal_months", "streak", "longest", "best_day",
+             "active_days", "cal_days")
+
+# linguist colours for the token-free fallback, where the API gives no colour
+LANG_COLOR = {
+    "Go": "#00ADD8", "Python": "#3572A5", "C": "#555555", "C++": "#f34b7d",
+    "Rust": "#dea584", "Java": "#b07219", "TypeScript": "#3178c6",
+    "JavaScript": "#f1e05a", "Shell": "#89e051", "HTML": "#e34c26",
+    "CSS": "#563d7c", "Jupyter Notebook": "#DA5B0B", "Kotlin": "#A97BFF",
+    "Swift": "#F05138", "Dart": "#00B4AB", "PHP": "#4F5D95", "Ruby": "#701516",
+    "C#": "#178600", "Makefile": "#427819", "CMake": "#DA3434",
+    "Vue": "#41b883", "Lua": "#000080", "Verilog": "#b2b7f8",
+}
+GREY = "#8b949e"
 
 
 def blank_stats():
     return {k: None for k in STAT_KEYS}
+
+
+def top_langs(sizes, colors, k=6):
+    """[(name, fraction, colour)] for the k biggest languages, plus 'Other'."""
+    total = sum(sizes.values())
+    if not total:
+        return None
+    ranked = sorted(sizes.items(), key=lambda kv: -kv[1])
+    out = [(n, v / total, colors.get(n) or LANG_COLOR.get(n, GREY))
+           for n, v in ranked[:k]]
+    rest = total - sum(v for _, v in ranked[:k])
+    if rest > 0:
+        out.append(("Other", rest / total, GREY))
+    return out
 
 
 def public_stats():
@@ -182,6 +233,7 @@ def public_stats():
         u = gh(f"https://api.github.com/users/{USER}")
         stars = repos = 0
         page = 1
+        sizes = {}
         while True:
             batch = gh(f"https://api.github.com/users/{USER}/repos"
                        f"?per_page=100&page={page}&type=owner")
@@ -191,7 +243,10 @@ def public_stats():
                 if not r["fork"]:
                     stars += r["stargazers_count"]
                     repos += 1
+                    if r.get("language"):     # no byte counts here; size-weighted
+                        sizes[r["language"]] = sizes.get(r["language"], 0) + max(r.get("size", 1), 1)
             page += 1
+        s["langs"] = top_langs(sizes, {})
         created = u.get("created_at", "")
         s.update(followers=u.get("followers", 0), following=u.get("following", 0),
                  repos=repos, stars=stars)
@@ -204,14 +259,32 @@ def public_stats():
     return s
 
 
-LOC_QUERY = """
-query($owner: String!, $name: String!, $id: ID!, $cursor: String) {
+TZ = timezone(timedelta(hours=5, minutes=30))   # bucket commits by local day
+
+# History authored by the user on one branch, private repos included. Every
+# branch is walked, not just the default one, so work that never landed on main
+# still counts; commits are deduped by SHA, so a branch that was merged
+# contributes its commits exactly once. This single walk feeds the commit count,
+# the LOC totals and the activity grid, so the card reports what the repos
+# actually contain rather than what GitHub's contribution rules credit.
+# `additions`/`deletions` are occasionally SERVICE_UNAVAILABLE on GitHub's side
+# and fail the whole query, so HIST_LITE is the retry that still gets the dates.
+BRANCH_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    defaultBranchRef { target { ... on Commit {
+    refs(refPrefix: "refs/heads/", first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor } nodes { name } } } }"""
+
+HIST_QUERY = """
+query($owner: String!, $name: String!, $id: ID!, $ref: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $ref) { target { ... on Commit {
       history(first: 100, author: {id: $id}, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { additions deletions }
+        nodes { oid committedDate additions deletions }
       } } } } } }"""
+
+HIST_LITE = HIST_QUERY.replace(" additions deletions", "")
 
 
 def year_contribs():
@@ -236,18 +309,128 @@ def year_contribs():
 
 
 def owned_repos(uid):
-    """All non-fork owned repos (public + private), paginated."""
+    """All non-fork owned repos (public + private), paginated, with per-repo
+    language byte counts."""
     nodes, cursor = [], None
     while True:
         page = graphql(f'''query($c: String) {{ user(login: "{USER}") {{
           repositories(first: 100, after: $c, ownerAffiliations: OWNER, isFork: false) {{
             totalCount pageInfo {{ hasNextPage endCursor }}
-            nodes {{ name stargazerCount isPrivate }} }} }} }}''',
+            nodes {{ name stargazerCount isPrivate
+              defaultBranchRef {{ name }}
+              languages(first: 12, orderBy: {{field: SIZE, direction: DESC}}) {{
+                edges {{ size node {{ name color }} }} }} }} }} }} }}''',
                        {"c": cursor}, token=PRIV_TOKEN)["user"]["repositories"]
         nodes += page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:
             return nodes
         cursor = page["pageInfo"]["endCursor"]
+
+
+def repo_langs(repos):
+    """Aggregate language bytes across every owned repo."""
+    sizes, colors = {}, {}
+    for r in repos:
+        for e in (r.get("languages") or {}).get("edges", []):
+            name = e["node"]["name"]
+            sizes[name] = sizes.get(name, 0) + e["size"]
+            colors[name] = e["node"]["color"] or LANG_COLOR.get(name, GREY)
+    return top_langs(sizes, colors)
+
+
+def branch_names(name, default=None):
+    """Every head ref of a repo, default branch first so that the branches which
+    were merged into it hit the already-seen shortcut in walk_commits()."""
+    out, cursor = [], None
+    while True:
+        page = graphql(BRANCH_QUERY, {"owner": USER, "name": name, "cursor": cursor},
+                       token=PRIV_TOKEN)["repository"]["refs"]
+        out += [n["name"] for n in page["nodes"]]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    if default in out:
+        out.remove(default)
+        out.insert(0, default)
+    return out
+
+
+def walk_commits(name, uid, default, seen, daily):
+    """Every commit the user authored in one repo, on ANY branch, deduped by SHA
+    and bucketed into `daily` by local calendar day. Private repos are included
+    as long as the token can see them. Returns (commits, +lines, -lines)."""
+    n = add = rem = 0
+    for br in branch_names(name, default):
+        cursor, lite = None, False
+        while True:
+            v = {"owner": USER, "name": name, "id": uid, "ref": br, "cursor": cursor}
+            try:
+                ref = graphql(HIST_LITE if lite else HIST_QUERY, v,
+                              token=PRIV_TOKEN)["repository"]["ref"]
+            except Exception as e:
+                if lite:                       # already the reduced query — give up
+                    print(f"  {name}@{br}: {e}")
+                    break
+                lite = True                    # additions/deletions unavailable
+                continue
+            if ref is None:
+                break
+            h = ref["target"]["history"]
+            fresh = 0
+            for c in h["nodes"]:
+                if c["oid"] in seen:
+                    continue
+                seen.add(c["oid"])
+                fresh += 1
+                n += 1
+                add += c.get("additions", 0)
+                rem += c.get("deletions", 0)
+                day = datetime.fromisoformat(c["committedDate"]).astimezone(TZ).date()
+                daily[day] = daily.get(day, 0) + 1
+            # a whole page already seen means this branch has rejoined history
+            # walked earlier; its ancestors are all counted, so stop paging
+            if fresh == 0 or not h["pageInfo"]["hasNextPage"]:
+                break
+            cursor = h["pageInfo"]["endCursor"]
+    return n, add, rem
+
+
+def commit_calendar(daily):
+    """A 53-column Sunday-first grid of the last year of real commits, plus the
+    streak figures derived from it."""
+    today = datetime.now(TZ).date()
+    start = today - timedelta(days=364)
+    start -= timedelta(days=(start.weekday() + 1) % 7)      # back up to Sunday
+
+    grid, months, seen_month = [], [], None
+    day = start
+    while day <= today:
+        cells = [None] * 7
+        for i in range(7):
+            d = day + timedelta(days=i)
+            if start <= d <= today:
+                cells[i] = daily.get(d, 0)
+        grid.append(cells)
+        if day.month != seen_month and (not months or len(grid) - months[-1][0] >= 3):
+            months.append((len(grid) - 1, day.strftime("%b")))
+            seen_month = day.month
+        day += timedelta(days=7)
+
+    days = [daily.get(start + timedelta(days=i), 0)
+            for i in range((today - start).days + 1)]
+    longest = run = 0
+    for c in days:
+        run = run + 1 if c else 0
+        longest = max(longest, run)
+    tail = days[:-1] if days and days[-1] == 0 else days   # today may not be done yet
+    streak = 0
+    for c in reversed(tail):
+        if not c:
+            break
+        streak += 1
+    return {"cal": grid, "cal_months": months, "streak": streak,
+            "longest": longest, "best_day": max(days) if days else 0,
+            "active_days": sum(1 for c in days if c), "cal_days": len(days)}
 
 
 def token_stats():
@@ -272,26 +455,22 @@ def token_stats():
     s["repos"] = len(repos)
     s["private"] = sum(1 for r in repos if r["isPrivate"])
     s["stars"] = sum(r["stargazerCount"] for r in repos)
+    s["langs"] = repo_langs(repos)
 
-    add = rem = 0
-    for name in [r["name"] for r in repos]:
-        cursor = None
-        try:
-            while True:
-                ref = graphql(LOC_QUERY,
-                              {"owner": USER, "name": name, "id": u["id"], "cursor": cursor},
-                              token=PRIV_TOKEN)["repository"]["defaultBranchRef"]
-                if ref is None:
-                    break
-                h = ref["target"]["history"]
-                add += sum(n["additions"] for n in h["nodes"])
-                rem += sum(n["deletions"] for n in h["nodes"])
-                if not h["pageInfo"]["hasNextPage"]:
-                    break
-                cursor = h["pageInfo"]["endCursor"]
-        except Exception as e:
-            print(f"loc {name}: {e}")
+    # one history walk per repo feeds commits, LOC and the activity grid
+    seen, daily = set(), {}
+    commits = add = rem = 0
+    for r in repos:
+        name = r["name"]
+        n, a, d = walk_commits(name, u["id"],
+                               (r.get("defaultBranchRef") or {}).get("name"),
+                               seen, daily)
+        commits += n
+        add += a
+        rem += d
+    s["commits"] = commits
     s["loc"], s["loc_add"], s["loc_del"] = add - rem, add, rem
+    s.update(commit_calendar(daily))
     return s
 
 
@@ -318,12 +497,22 @@ def kv2(k1, v1, k2, v2):
 
 
 def rule(title=""):
+    """A section rule. Rendered as text plus a packet that rides the dashes."""
     label = f"- {title} " if title else ""
-    return [(label, "h"), ("-" * (DOT_W - len(label)), "d")]
+    return {"kind": "rule", "label": len(label),
+            "segs": [(label, "h"), ("-" * (DOT_W - len(label)), "d")]}
 
 
 def num(x):
-    return "—" if x is None else f"{x:,}"
+    """Human-readable short form: 942, 4.8K, 12K, 340K, 1.4M."""
+    if x is None:
+        return "—"
+    sign, n = ("-" if x < 0 else ""), abs(float(x))
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if n >= div:
+            v = n / div
+            return f"{sign}{v:.1f}{suf}" if v < 10 else f"{sign}{v:.0f}{suf}"
+    return f"{sign}{n:.0f}"
 
 
 def member_str(s):
@@ -340,13 +529,31 @@ def repos_str(s):
     return f"{s['repos']}{priv}"
 
 
+def lang_legend(langs):
+    """Pack '● Name 41.2%' chips into at most two DOT_W-wide lines."""
+    lines, cur, used = [], [], 0
+    for name, frac, color in langs:
+        chip = f"{name} {frac * 100:.1f}%"
+        cost = len(chip) + 4                     # bullet + space + two-space gap
+        if used + cost > DOT_W and cur:
+            lines.append(cur)
+            cur, used = [], 0
+            if len(lines) == 2:
+                break
+        cur += [("● ", color), (chip + "  ", "v")]
+        used += cost
+    if cur and len(lines) < 2:
+        lines.append(cur)
+    return lines
+
+
 def info_lines(s):
     handle = INFO["handle"]
-    return [
+    lines = [
         [(f"{handle} ", "h"), ("-" * (DOT_W - len(handle) - 1), "d")],
         [],
         kv("Role", INFO["role"]),
-        kv("Company", INFO["company"]),
+        kv("Organization", INFO["company"]),
         kv("Location", INFO["location"]),
         kv("Focus", INFO["focus"]),
         kv("Languages", INFO["languages"]),
@@ -371,6 +578,23 @@ def info_lines(s):
           (num(s["loc_del"]) + "--", "r"), (" )", "d")]
          if s["loc"] is not None else kv("Lines of Code", "—")),
     ]
+
+    if s.get("langs"):
+        lines += [[], rule("Code Composition"),
+                  {"kind": "bar", "segs": s["langs"], "slots": 1}]
+        lines += lang_legend(s["langs"])
+
+    if s.get("cal"):
+        span = f"last {len(s['cal'])} weeks"
+        active = f"{s['active_days']} / {s['cal_days']} d"
+        lines += [
+            [], rule(f"Commit Activity · {span}"),
+            {"kind": "heat", "weeks": s["cal"],
+             "months": s.get("cal_months") or [], "slots": 3},
+            kv2("Streak", f"{s['streak']} d", "Longest", f"{s['longest']} d"),
+            kv2("Best Day", num(s["best_day"]), "Active", active),
+        ]
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +625,31 @@ def face_columns():
     return cols
 
 
-def render_portrait(mode):
+def layout(lines):
+    """Derive the whole card from the panel content: the panel sets the height,
+    the portrait scales up to fill that height (capped), and the card width
+    follows the portrait. Sets CARD_W / PANEL_X, which the renderers read."""
+    global CARD_W, PANEL_X
+    slots = sum(line.get("slots", 1) if isinstance(line, dict) else 1
+                for line in lines)
+    card_h = max(int(PANEL_Y + slots * PANEL_STEP + 28), MIN_CARD_H)
+    screen_h = card_h - 2 * SCREEN_Y
+
+    ncols = max(face_columns()) + 1
+    face_w, face_h = ncols * ART_CW, len(FACE) * ART_LH
+    scale = min((screen_h - 44) / face_h, MAX_FACE_SCALE)
+    lh, cw, fs = ART_LH * scale, ART_CW * scale, ART_FS * scale
+    screen_w = face_w * scale + 34
+
+    PANEL_X = SCREEN_X + screen_w + GUTTER
+    CARD_W = int(PANEL_X + PANEL_W + 26)
+    return {"card_h": card_h, "screen_w": screen_w, "screen_h": screen_h,
+            "art_x": SCREEN_X + (screen_w - face_w * scale) / 2,
+            "art_y": SCREEN_Y + (screen_h - face_h * scale) / 2 + lh,
+            "lh": lh, "cw": cw, "fs": fs}
+
+
+def render_portrait(L):
     """Face crystallises column-by-column behind the rain: each column wipes in
     top-to-bottom, holds, then melts away top-to-bottom.
 
@@ -412,19 +660,20 @@ def render_portrait(mode):
     loaded as an <img>, which rendered the whole face blank on Apple devices; opacity
     animates identically everywhere. Each cell reveals/melts as the (former clip)
     frontier would have passed its row, so the visible result is unchanged."""
-    top = ART_Y - ART_LH
-    height = len(FACE) * ART_LH + ART_LH
+    art_x, art_y, lh, cw = L["art_x"], L["art_y"], L["lh"], L["cw"]
+    top = art_y - lh
+    height = len(FACE) * lh + lh
     rng = random.Random(SEED)
     cols = face_columns()
     ncols = max(cols) + 1
-    out = [f'<g font-size="{ART_FS}px">']
+    out = [f'<g font-size="{L["fs"]:.2f}px">']
     for c in sorted(cols):
-        cx = ART_X + c * ART_CW
+        cx = art_x + c * cw
         jitter = (c / ncols) * 1.3 + rng.uniform(0.0, 0.55)     # identical per-column stagger
         begin = f"{-CYCLE + 0.5 + jitter:.3f}s"
         cells = []
         for r, ch, lvl in cols[c]:
-            y = ART_Y + r * ART_LH
+            y = art_y + r * lh
             frac = (y - top) / height                            # row position along the wipe
             rs = 0.12 + frac * 0.20                               # reveal frontier reaches this row
             ms = 0.80 + frac * 0.15                               # melt frontier reaches this row
@@ -439,21 +688,24 @@ def render_portrait(mode):
     return "\n".join(out)
 
 
-def render_rain():
+def render_rain(L):
     """Green glyph streams falling over the portrait columns. Strong while the
-    face is forming, faint while it holds, strong again as it melts."""
+    face is forming, faint while it holds, strong again as it melts. The streams
+    span the whole screen, not just the face, so the padding around a centred
+    portrait still rains."""
     rng = random.Random(SEED + 99)
-    top = ART_Y - ART_LH
-    span = len(FACE) * ART_LH + 150
+    lh, cw = L["lh"], L["cw"]
+    top = SCREEN_Y - lh
+    span = L["screen_h"] + 120
     cols = face_columns()
-    out = [f'<g font-size="{ART_FS}px">'
+    out = [f'<g font-size="{L["fs"]:.2f}px">'
            f'<animate attributeName="opacity" dur="{CYCLE}s" repeatCount="indefinite" '
            f'values="0.9;1;1;0.85;0.1;0.1;0.85;1;0.9" '
            f'keyTimes="0;0.08;0.22;0.32;0.5;0.74;0.86;0.96;1"/>']
     for c in sorted(cols):
         if rng.random() > 0.55:               # ~45% of columns carry a stream
             continue
-        x = ART_X + c * ART_CW
+        x = L["art_x"] + c * cw
         length = rng.randint(7, 14)
         dur = rng.uniform(1.7, 3.4)
         delay = rng.uniform(-3.4, 0.0)
@@ -465,7 +717,7 @@ def render_rain():
                 fill, op = FACE_RAIN_HEAD, 1.0
             else:
                 fill, op = FACE_RAIN, round(0.08 + 0.62 * frac, 2)
-            dy = "0" if j == 0 else f"{ART_LH:.1f}"
+            dy = "0" if j == 0 else f"{lh:.1f}"
             tspans.append(f'<tspan x="{x:.1f}" dy="{dy}" fill="{fill}" '
                           f'opacity="{op}">{esc(ch)}</tspan>')
         out.append(
@@ -477,28 +729,133 @@ def render_rain():
     return "\n".join(out)
 
 
-def render_panel(p, stats):
+def col(p, c):
+    """Segment colour: a palette key, or a literal '#rrggbb' (language chips)."""
+    return c if c.startswith("#") else p[c]
+
+
+def fade(begin, dur=0.5):
+    return (f'<animate attributeName="opacity" begin="{begin:.2f}s" dur="{dur}s" '
+            f'values="0;1" calcMode="spline" keySplines=".3 0 .3 1" fill="freeze"/>')
+
+
+def rule_line(p, line, y, begin, idx):
+    """Section rule, with a short bright packet riding the dashes left to right
+    on a slow loop — the dotted rule read as a bus, one packet on it."""
+    spans = "".join(f'<tspan fill="{col(p, c)}">{esc(t)}</tspan>'
+                    for t, c in line["segs"])
+    x0 = PANEL_X + line["label"] * CH_W
+    travel = (DOT_W - line["label"]) * CH_W - 16
+    return (f'<text x="{PANEL_X}" y="{y:.1f}" opacity="0" xml:space="preserve">'
+            f'{spans}{fade(begin)}</text>'
+            f'<rect x="{x0:.1f}" y="{y - 4:.1f}" width="14" height="1.6" rx="0.8" '
+            f'fill="{p["g"]}" opacity="0">'
+            f'<animateTransform attributeName="transform" type="translate" '
+            f'dur="{PULSE_DUR}s" begin="{2.0 + idx * 1.7:.2f}s" '
+            f'repeatCount="indefinite" values="0 0;{travel:.0f} 0" '
+            f'calcMode="spline" keySplines=".45 0 .55 1"/>'
+            f'<animate attributeName="opacity" dur="{PULSE_DUR}s" '
+            f'begin="{2.0 + idx * 1.7:.2f}s" repeatCount="indefinite" '
+            f'values="0;0.85;0.85;0;0" keyTimes="0;0.08;0.72;0.85;1"/></rect>')
+
+
+def lang_bar(p, langs, y, begin):
+    """Full-width stacked bar of language shares, rounded via a clip rect."""
+    h, top = 11, y - 11
+    out = [f'<g opacity="0">{fade(begin)}',
+           f'<clipPath id="langclip"><rect x="{PANEL_X}" y="{top}" '
+           f'width="{PANEL_W:.1f}" height="{h}" rx="{h / 2}"/></clipPath>',
+           f'<g clip-path="url(#langclip)">']
+    x = float(PANEL_X)
+    for i, (_, frac, color) in enumerate(langs):
+        w = PANEL_W * frac
+        if i == len(langs) - 1:                 # absorb rounding into the last one
+            w = PANEL_X + PANEL_W - x
+        out.append(f'<rect x="{x:.2f}" y="{top}" width="{max(w, 0.6):.2f}" '
+                   f'height="{h}" fill="{color}"/>')
+        x += w
+    out.append('</g></g>')
+    return "".join(out)
+
+
+def heat_levels(weeks):
+    """Bucket day counts the way GitHub does: quartiles of the days that HAVE
+    contributions, not fractions of the peak day. Scaling against the peak makes
+    one outlier day (111 commits) push every ordinary day into the palest green;
+    quartiles keep the grid's contrast where the actual distribution is."""
+    vals = sorted(c for w in weeks for c in w if c)
+    if not vals:
+        return []
+    return [vals[min(int(len(vals) * f), len(vals) - 1)] for f in (0.25, 0.5, 0.75)]
+
+
+def heat_map(p, weeks, months, y, begin):
+    """GitHub-style 7-row contribution grid, one column per week. The grid fills
+    the panel width minus a right-hand gutter for the less/more key."""
+    step = (PANEL_W - HEAT_KEY_W) / max(len(weeks), 1)
+    cell = step - 1.5                        # ~25% gap, as on github.com
+    top = y - 6
+    cuts = heat_levels(weeks)
+    ramp = p["heat"]
+    out = [f'<g opacity="0">{fade(begin, 0.6)}']
+    for wi, name in months:                  # month ticks above the grid
+        out.append(f'<text x="{PANEL_X + wi * step:.1f}" y="{top - 4:.1f}" '
+                   f'font-size="8.5px" fill="{p["d"]}">{name}</text>')
+    for wi, week in enumerate(weeks):
+        for di, count in enumerate(week):
+            if count is None:                # day outside the queried range
+                continue
+            lvl = 0 if not count else 1 + sum(1 for c in cuts if count > c)
+            out.append(
+                f'<rect x="{PANEL_X + wi * step:.2f}" y="{top + di * step:.2f}" '
+                f'width="{cell:.2f}" height="{cell:.2f}" rx="1.1" fill="{ramp[lvl]}"/>')
+    # key: less [][][][][] more, in the gutter, centred on the grid
+    kc, kstep = 5.5, 7.0
+    lx = PANEL_X + len(weeks) * step + 10
+    ly = top + (7 * step - kc) / 2
+    out.append(f'<text x="{lx:.1f}" y="{ly + 5:.1f}" font-size="9px" '
+               f'fill="{p["d"]}">less</text>')
+    for i, c in enumerate(ramp):
+        out.append(f'<rect x="{lx + 25 + i * kstep:.1f}" y="{ly:.1f}" width="{kc}" '
+                   f'height="{kc}" rx="1.2" fill="{c}"/>')
+    out.append(f'<text x="{lx + 25 + 5 * kstep + 3:.1f}" y="{ly + 5:.1f}" '
+               f'font-size="9px" fill="{p["d"]}">more</text>')
+    out.append('</g>')
+    return "".join(out)
+
+
+def render_panel(p, lines):
     """Neofetch panel that prints itself line-by-line (each line fades in,
     staggered top-to-bottom), then a green caret blinks. Opacity-only: the
     original left-to-right clip-path 'typing' wipe also blanked on Safari/WebKit
     (animated clipPath), so the reveal is done with opacity, which animates
-    everywhere."""
-    lines = info_lines(stats)
+    everywhere. Graphic rows (language bar, contribution grid) join the same
+    stagger and consume `slots` line heights."""
     body = []
-    rank, last_y = 0, PANEL_Y
-    for i, segs in enumerate(lines):
-        if not segs:
+    rank, slot, rules = 0, 0, 0
+    for line in lines:
+        y = PANEL_Y + slot * PANEL_STEP
+        if isinstance(line, dict):
+            begin = 0.4 + rank * 0.09
+            if line["kind"] == "bar":
+                body.append(lang_bar(p, line["segs"], y, begin))
+            elif line["kind"] == "heat":
+                body.append(heat_map(p, line["weeks"], line["months"], y, begin))
+            elif line["kind"] == "rule":
+                body.append(rule_line(p, line, y, begin, rules))
+                rules += 1
+            slot += line.get("slots", 1)
+            rank += 1
             continue
-        y = PANEL_Y + i * PANEL_STEP
-        last_y = y
-        begin = 0.4 + rank * 0.09
-        spans = "".join(f'<tspan fill="{p[c]}">{esc(t)}</tspan>' for t, c in segs)
-        body.append(
-            f'<text x="{PANEL_X}" y="{y:.1f}" opacity="0" xml:space="preserve">{spans}'
-            f'<animate attributeName="opacity" begin="{begin:.2f}s" dur="0.5s" '
-            f'values="0;1" calcMode="spline" keySplines=".3 0 .3 1" fill="freeze"/></text>')
-        rank += 1
-    caret_y = last_y + PANEL_STEP
+        if line:
+            spans = "".join(f'<tspan fill="{col(p, c)}">{esc(t)}</tspan>'
+                            for t, c in line)
+            body.append(
+                f'<text x="{PANEL_X}" y="{y:.1f}" opacity="0" xml:space="preserve">'
+                f'{spans}{fade(0.4 + rank * 0.09)}</text>')
+            rank += 1
+        slot += 1
+    caret_y = PANEL_Y + slot * PANEL_STEP
     caret_begin = 0.4 + rank * 0.09
     caret = (f'<rect x="{PANEL_X}" y="{caret_y - 11:.0f}" width="8" height="14" '
              f'fill="{p["g"]}" opacity="0"><animate attributeName="opacity" '
@@ -509,21 +866,24 @@ def render_panel(p, stats):
 
 def render(mode, stats):
     p = PALETTES[mode]
+    lines = info_lines(stats)
+    L = layout(lines)
+    card_h, screen_w, screen_h = L["card_h"], L["screen_w"], L["screen_h"]
     return "\n".join([
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{CARD_W}" height="{CARD_H}" '
-        f'viewBox="0 0 {CARD_W} {CARD_H}" {FONT} font-size="{PANEL_FS}px">',
-        f'<rect x="0.5" y="0.5" width="{CARD_W - 1}" height="{CARD_H - 1}" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{CARD_W}" height="{card_h}" '
+        f'viewBox="0 0 {CARD_W} {card_h}" {FONT} font-size="{PANEL_FS}px">',
+        f'<rect x="0.5" y="0.5" width="{CARD_W - 1}" height="{card_h - 1}" '
         f'rx="12" fill="{p["bg"]}" stroke="{p["border"]}"/>',
         # dark "screen" behind the face, clipped so rain never spills past it
-        f'<clipPath id="scr"><rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{SCREEN_W}" '
-        f'height="{SCREEN_H}" rx="10"/></clipPath>',
-        f'<rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{SCREEN_W}" height="{SCREEN_H}" '
+        f'<clipPath id="scr"><rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{screen_w:.1f}" '
+        f'height="{screen_h}" rx="10"/></clipPath>',
+        f'<rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{screen_w:.1f}" height="{screen_h}" '
         f'rx="10" fill="{SCREEN_BG}" stroke="{SCREEN_BORDER}"/>',
         f'<g clip-path="url(#scr)">',
-        render_rain(),
-        render_portrait(mode),
+        render_rain(L),
+        render_portrait(L),
         '</g>',
-        render_panel(p, stats),
+        render_panel(p, lines),
         '</svg>',
     ])
 
@@ -531,12 +891,22 @@ def render(mode, stats):
 def selfcheck():
     assert len("".join(t for t, _ in kv("Role", INFO["role"]))) == DOT_W
     assert FACE and all(len(g) == len(l) for g, l in FACE), "grid glyph/level mismatch"
+    assert num(0) == "0" and num(942) == "942" and num(4832) == "4.8K"
+    assert num(12400) == "12K" and num(1_420_000) == "1.4M" and num(None) == "—"
+    # a full-fat panel must still fit inside the card it sizes
+    demo = blank_stats()
+    demo.update(langs=[("Go", 0.6, "#00ADD8"), ("Python", 0.4, "#3572A5")],
+                cal=[[0] * 7] * 53, streak=1, longest=1, best_day=1,
+                active_days=1, cal_days=365)
+    L = layout(info_lines(demo))
+    assert PANEL_X + PANEL_W < CARD_W - 8, "panel overflows the card width"
+    assert L["art_y"] > SCREEN_Y, "portrait pushed off the screen panel"
 
 
 if __name__ == "__main__":
     selfcheck()
     stats = fetch_stats()
-    print("stats:", stats)
+    print("stats:", {k: v for k, v in stats.items() if k != "cal"})
     for mode in PALETTES:
         with open(f"{mode}_mode.svg", "w", encoding="utf-8") as f:
             f.write(render(mode, stats))

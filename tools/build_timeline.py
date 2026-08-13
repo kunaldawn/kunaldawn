@@ -20,22 +20,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 LOGOS_JSON = os.path.join(HERE, "career_logos.json")
 
-# (key, org, role, years) — key "SECTION" marks a section header row.
+# (key, org, role, years, location) — key "SECTION" marks a section header row.
 # Pocket52 and Bobble AI each appear twice (two separate tenures).
 TIMELINE = [
-    ("SECTION", "Experience", "", ""),
-    ("bobble", "Bobble AI", "SVP of Engineering", "2021 — Present"),
-    ("gameskraft", "Gameskraft", "Engineering Manager", "2021 — 2021"),
-    ("pocket52", "Pocket52", "Lead Architect", "2021 — 2021"),
-    ("cloudfeather", "CloudFeather Games", "Co-Founder & CTO", "2020 — 2021"),
-    ("pocket52", "Pocket52", "VP of Engineering · Technology Architect", "2018 — 2020"),
-    ("bobble", "Bobble AI", "Research & Development Lead", "2015 — 2018"),
-    ("sony", "Sony Mobile Communications", "System Verification Engineer", "2014 — 2015"),
-    ("srmtech", "SRM Technologies", "Sr. Technical Consultant · Japan", "2013 — 2015"),
-    ("nec", "NEC Corporation", "Technical Consultant · Intern · Japan", "2012 — 2014"),
-    ("SECTION", "Education", "", ""),
-    ("srm_univ", "SRM University", "M.Tech, Computer Science & Engineering · 3rd Rank", "2011 — 2013"),
-    ("smit", "Sikkim Manipal Institute of Technology", "B.Tech, Computer Science & Engineering", "2007 — 2011"),
+    ("SECTION", "Experience", "", "", ""),
+    ("bobble", "Bobble AI", "SVP of Engineering", "2021 — Present", "Bangalore, India"),
+    ("gameskraft", "Gameskraft", "Engineering Manager", "2021 — 2021", "Bangalore, India"),
+    ("pocket52", "Pocket52", "Lead Architect", "2021 — 2021", "Bangalore, India"),
+    ("cloudfeather", "CloudFeather Games", "Co-Founder & CTO", "2020 — 2021", "Bangalore, India"),
+    ("pocket52", "Pocket52", "VP of Engineering · Technology Architect", "2018 — 2020", "Bangalore, India"),
+    ("bobble", "Bobble AI", "Research & Development Lead", "2015 — 2018", "Bangalore, India"),
+    ("sony", "Sony Mobile Communications", "System Verification Engineer", "2014 — 2015", "Tokyo, Japan"),
+    ("srmtech", "SRM Technologies", "Sr. Technical Consultant", "2013 — 2015", "Tokyo, Japan"),
+    ("nec", "NEC Corporation", "Technical Consultant · Intern", "2012 — 2014", "Kawasaki, Japan"),
+    ("SECTION", "Education", "", "", ""),
+    ("srm_univ", "SRM University", "M.Tech, Computer Science & Engineering · 3rd Rank", "2011 — 2013", "Chennai, India"),
+    ("smit", "Sikkim Manipal Institute of Technology", "B.Tech, Computer Science & Engineering", "2007 — 2011", "Sikkim, India"),
 ]
 
 # --- geometry ---------------------------------------------------------------
@@ -50,6 +50,7 @@ LOGO_W, LOGO_H = 74, 30
 TEXT_X = 146
 YEAR_X = CARD_W - 30
 FONT = "font-family=\"'JetBrains Mono','SF Mono',Consolas,Menlo,monospace\""
+SPINE_PULSE = 11.0                # charge-down-the-spine loop, seconds
 
 
 def theme(mode):
@@ -120,10 +121,17 @@ def build(mode, logos):
         f'viewBox="0 0 {CARD_W} {H:.0f}" {FONT}>',
         f'<rect x="0.5" y="0.5" width="{CARD_W - 1}" height="{H - 1:.0f}" rx="12" '
         f'fill="{t["bg"]}" stroke="{t["border"]}"/>',
-        # title
+        # title, with a packet riding the dotted rule on a slow loop
         f'<text x="30" y="38" font-size="13px" xml:space="preserve">'
         f'<tspan fill="{t["head"]}">- Career &amp; Education </tspan>'
         f'<tspan fill="{t["dots"]}">{"-" * 66}</tspan></text>',
+        f'<rect x="{30 + 21 * 7.8:.0f}" y="34" width="14" height="1.6" rx="0.8" '
+        f'fill="{t["year"]}" opacity="0">'
+        f'<animateTransform attributeName="transform" type="translate" dur="9s" '
+        f'repeatCount="indefinite" values="0 0;{66 * 7.8 - 20:.0f} 0" '
+        f'calcMode="spline" keySplines=".45 0 .55 1"/>'
+        f'<animate attributeName="opacity" dur="9s" repeatCount="indefinite" '
+        f'values="0;0.85;0.85;0;0" keyTimes="0;0.08;0.72;0.85;1"/></rect>',
         # spine (draws itself top -> bottom)
         f'<line x1="{SPINE_X}" y1="{spine_top:.1f}" x2="{SPINE_X}" y2="{spine_bot:.1f}" '
         f'stroke="{t["spine"]}" stroke-width="2" stroke-dasharray="{spine_len:.1f}" '
@@ -131,6 +139,15 @@ def build(mode, logos):
         f'<animate attributeName="stroke-dashoffset" from="{spine_len:.1f}" to="0" '
         f'begin="0.2s" dur="1.1s" calcMode="spline" keySplines=".4 0 .2 1" fill="freeze"/>'
         f'</line>',
+        # a charge runs down the spine once the line has drawn itself, then loops
+        f'<circle cx="{SPINE_X}" cy="{spine_top:.1f}" r="3.5" fill="{t["year"]}" '
+        f'opacity="0">'
+        f'<animateTransform attributeName="transform" type="translate" '
+        f'begin="1.4s" dur="{SPINE_PULSE}s" repeatCount="indefinite" '
+        f'values="0 0;0 {spine_len:.1f}" calcMode="spline" keySplines=".5 0 .5 1"/>'
+        f'<animate attributeName="opacity" begin="1.4s" dur="{SPINE_PULSE}s" '
+        f'repeatCount="indefinite" values="0;0.9;0.9;0;0" '
+        f'keyTimes="0;0.06;0.62;0.72;1"/></circle>',
     ]
 
     idx = 0
@@ -144,7 +161,7 @@ def build(mode, logos):
                 f'dur="0.4s" values="0;1" fill="freeze"/></text>')
             idx += 1
             continue
-        _, org, role, years = item
+        _, org, role, years, location = item
         begin = 0.3 + idx * 0.12
         # node dot on the spine
         node = (f'<circle cx="{SPINE_X}" cy="{cy:.1f}" r="4" fill="{t["node"]}" '
@@ -163,8 +180,10 @@ def build(mode, logos):
               f'font-weight="600" fill="{t["org"]}">{esc(org)}</text>'
             + f'<text x="{TEXT_X:.0f}" y="{cy + 13:.1f}" font-size="11.5px" '
               f'fill="{t["role"]}">{esc(role)}</text>'
-            + f'<text x="{YEAR_X:.0f}" y="{cy + 3:.1f}" font-size="12px" '
+            + f'<text x="{YEAR_X:.0f}" y="{cy - 4:.1f}" font-size="12px" '
               f'font-weight="600" text-anchor="end" fill="{t["year"]}">{esc(years)}</text>'
+            + f'<text x="{YEAR_X:.0f}" y="{cy + 12:.1f}" font-size="10.5px" '
+              f'text-anchor="end" fill="{t["role"]}">{esc(location)}</text>'
             + '</g>')
         out.append(node + content)
         idx += 1
