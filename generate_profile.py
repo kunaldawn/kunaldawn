@@ -260,6 +260,9 @@ def public_stats():
 
 
 TZ = timezone(timedelta(hours=5, minutes=30))   # bucket commits by local day
+BULK_COMMIT = 10_000        # a single commit this large is a vendored/generated
+                            # import, not authored work — counted as a commit,
+                            # but kept out of the lines-written total
 
 # History authored by the user on one branch, private repos included. Every
 # branch is walked, not just the default one, so work that never landed on main
@@ -281,7 +284,7 @@ query($owner: String!, $name: String!, $id: ID!, $ref: String!, $cursor: String)
     ref(qualifiedName: $ref) { target { ... on Commit {
       history(first: 100, author: {id: $id}, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { oid committedDate additions deletions }
+        nodes { oid committedDate additions deletions parents { totalCount } }
       } } } } } }"""
 
 HIST_LITE = HIST_QUERY.replace(" additions deletions", "")
@@ -373,7 +376,7 @@ def branch_names(name, default=None):
     return out
 
 
-def walk_commits(name, uid, default, seen, daily, offbranch):
+def walk_commits(name, uid, default, seen, daily, offbranch, skipped):
     """Every commit the user authored in one repo, on ANY branch, deduped by SHA
     and bucketed into `daily` by local calendar day. Private repos are included
     as long as the token can see them. Returns (commits, +lines, -lines).
@@ -384,7 +387,7 @@ def walk_commits(name, uid, default, seen, daily, offbranch):
     GitHub's own daily counts."""
     n = add = rem = 0
     for br in branch_names(name, default):
-        off = br != default
+        off = br != default          # off-main work feeds the grid, not the counts
         cursor, lite = None, False
         while True:
             v = {"owner": USER, "name": name, "id": uid, "ref": br, "cursor": cursor}
@@ -406,13 +409,25 @@ def walk_commits(name, uid, default, seen, daily, offbranch):
                     continue
                 seen.add(c["oid"])
                 fresh += 1
-                n += 1
-                add += c.get("additions", 0)
-                rem += c.get("deletions", 0)
                 day = datetime.fromisoformat(c["committedDate"]).astimezone(TZ).date()
                 daily[day] = daily.get(day, 0) + 1
                 if off:
                     offbranch[day] = offbranch.get(day, 0) + 1
+                    continue
+                # main-branch commits are the only ones counted. A merge commit
+                # restates the changes of the branch it merged, and a huge single
+                # commit is a vendored/generated drop — neither is authored work,
+                # so neither contributes to the lines total.
+                n += 1
+                a, d = c.get("additions", 0), c.get("deletions", 0)
+                if c.get("parents", {}).get("totalCount", 1) > 1:
+                    skipped["merge"] += 1
+                elif max(a, d) > BULK_COMMIT:
+                    skipped["bulk"] += 1
+                    skipped["bulk_lines"] += a
+                else:
+                    add += a
+                    rem += d
             # a whole page already seen means this branch has rejoined history
             # walked earlier; its ancestors are all counted, so stop paging
             if fresh == 0 or not h["pageInfo"]["hasNextPage"]:
@@ -485,17 +500,20 @@ def token_stats():
 
     # one history walk per repo feeds commits, LOC and the activity grid
     seen, daily, offbranch = set(), {}, {}
+    skipped = {"merge": 0, "bulk": 0, "bulk_lines": 0}
     commits = add = rem = 0
     for r in repos:
         name = r["name"]
         n, a, d = walk_commits(name, u["id"],
                                (r.get("defaultBranchRef") or {}).get("name"),
-                               seen, daily, offbranch)
+                               seen, daily, offbranch, skipped)
         commits += n
         add += a
         rem += d
     s["commits"] = commits
     s["loc"], s["loc_add"], s["loc_del"] = add - rem, add, rem
+    print(f"lines exclude {skipped['merge']} merge commits and {skipped['bulk']} "
+          f"bulk imports (+{skipped['bulk_lines']:,} lines)")
 
     # Activity grid = GitHub's daily counts (the only view of private ORG repos)
     # plus our off-default-branch commits (the work GitHub never credits).
@@ -606,13 +624,14 @@ def info_lines(s):
         rule("GitHub Stats"),
         kv("Member Since", member_str(s)),
         kv2("Repos", repos_str(s), "Stars", num(s["stars"])),
-        kv2("Commits", num(s["commits"]), "Followers", num(s["followers"])),
+        kv("Commits (my repos, main)", num(s["commits"])),
+        kv("Contributions (GitHub)", num(s["contribs"])),
         kv2("Pull Reqs", num(s["prs"]), "Issues", num(s["issues"])),
-        kv2("Contribs", num(s["contribs"]), "Reviews", num(s["reviews"])),
-        ([("Lines of Code: ", "k"), (num(s["loc"]), "v"), ("  ( ", "d"),
+        kv2("Reviews", num(s["reviews"]), "Followers", num(s["followers"])),
+        ([("Lines Written: ", "k"), (num(s["loc"]), "v"), ("  ( ", "d"),
           (num(s["loc_add"]) + "++", "g"), (", ", "d"),
           (num(s["loc_del"]) + "--", "r"), (" )", "d")]
-         if s["loc"] is not None else kv("Lines of Code", "—")),
+         if s["loc"] is not None else kv("Lines Written", "—")),
     ]
 
     if s.get("langs"):
@@ -880,6 +899,11 @@ def render_panel(p, lines):
             elif line["kind"] == "rule":
                 body.append(rule_line(p, line, y, begin, rules))
                 rules += 1
+            elif line["kind"] == "note":
+                body.append(
+                    f'<text x="{PANEL_X}" y="{y:.1f}" font-size="10px" '
+                    f'fill="{p["d"]}" opacity="0" xml:space="preserve">'
+                    f'{esc(line["text"])}{fade(begin)}</text>')
             slot += line.get("slots", 1)
             rank += 1
             continue
